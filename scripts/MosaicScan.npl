@@ -38,7 +38,10 @@ How it works:
      camera's current field of view (X only -- Y is computed from the fixed
      camera aspect ratio), the desired tile overlap, optional X/Y border
      offsets from the target's edges, and a name for this scan.
-  3. The program computes a grid that fully covers the target, centered on
+  3. The confirmation screen that follows shows both the per-tile field of
+     view and the total scan area (target size plus/minus the border
+     offsets) before anything moves -- cancel there if it looks wrong.
+  4. The program computes a grid that fully covers the target, centered on
      it, creates report/Mosaic_<scan name>/, and steps through the grid in
      a snake pattern (left-right, then right-left on the next row, etc.) to
      minimize travel, saving one .bmp per position.
@@ -325,137 +328,139 @@ begin
 
     params = Setup();
 
-    if Confirmation("MosaicScan",
-                     StringOf("Scan target '", params.targetName, "' now?\n",
-                               "Field of view: ", params.fovX:0:2, " x ", params.fovY:0:2, " mm\n",
-                               "Overlap: ", params.overlap:0:1, " %")) then begin
+    targetId = GetObjId(name = params.targetName);
 
-        targetId = GetObjId(name = params.targetName);
+    if targetId = 0 then begin
 
-        if targetId = 0 then begin
+        Message("Error", "Target '", params.targetName, "' was not found on the work plate.\n",
+                "Check spelling against the Work Plate window and try again.");
 
-            Message("Error", "Target '", params.targetName, "' was not found on the work plate.\n",
-                    "Check spelling against the Work Plate window and try again.");
+    end;
+    else begin
+
+        w = GetObjValue(object = targetId, valueIndex = 1);    // target width  (X)
+        h = GetObjValue(object = targetId, valueIndex = 2);    // target height (Y)
+        cx = GetObjValue(object = targetId, valueIndex = 4) + w / 2.0;    // target center X
+        cy = GetObjValue(object = targetId, valueIndex = 5) + h / 2.0;    // target center Y
+
+        // Offset applied evenly on both sides of each axis, so the scan
+        // stays centered on cx/cy regardless of sign.
+        scanW = w + 2.0 * params.borderOffsetX;
+        scanH = h + 2.0 * params.borderOffsetY;
+
+        if (scanW <= 0.0) or (scanH <= 0.0) then begin
+
+            Message("Error", "Border offset (X=", params.borderOffsetX:0:2, ", Y=", params.borderOffsetY:0:2, ") mm is too negative for this target.\n",
+                    "Target size: ", w:0:2, " x ", h:0:2, " mm -- offset would shrink the scan area to zero or less.");
 
         end;
-        else begin
+        // Target/offsets are looked up before this confirmation (rather
+        // than after, as a plain Setup() dialog field could) so the actual
+        // scan area can be shown here, not just the per-tile field of view.
+        else if Confirmation("MosaicScan",
+                         StringOf("Scan target '", params.targetName, "' now?\n",
+                                   "Field of view: ", params.fovX:0:2, " x ", params.fovY:0:2, " mm\n",
+                                   "Scan area:     ", scanW:0:2, " x ", scanH:0:2, " mm\n",
+                                   "Overlap: ", params.overlap:0:1, " %")) then begin
 
-            w = GetObjValue(object = targetId, valueIndex = 1);    // target width  (X)
-            h = GetObjValue(object = targetId, valueIndex = 2);    // target height (Y)
-            cx = GetObjValue(object = targetId, valueIndex = 4) + w / 2.0;    // target center X
-            cy = GetObjValue(object = targetId, valueIndex = 5) + h / 2.0;    // target center Y
+            // fovX/fovY swapped here on purpose: col drives stage-X, which
+            // is the camera's VERTICAL image axis (see camera-rotation
+            // note above), so col's spacing must come from fovY -- and
+            // symmetrically row's spacing comes from fovX.
+            stepX = params.fovY * (1.0 - params.overlap / 100.0);
+            stepY = params.fovX * (1.0 - params.overlap / 100.0);
 
-            // Offset applied evenly on both sides of each axis, so the scan
-            // stays centered on cx/cy regardless of sign.
-            scanW = w + 2.0 * params.borderOffsetX;
-            scanH = h + 2.0 * params.borderOffsetY;
+            nCols = TileCount(scanW, params.fovY, stepX);
+            nRows = TileCount(scanH, params.fovX, stepY);
 
-            if (scanW <= 0.0) or (scanH <= 0.0) then begin
+            // Start at the far corner and count down (see header note on
+            // scan direction) so tile r01_c01 lands top-left, not
+            // bottom-right.
+            startX = cx + ((nCols - 1) * stepX) / 2.0;
+            startY = cy + ((nRows - 1) * stepY) / 2.0;
 
-                Message("Error", "Border offset (X=", params.borderOffsetX:0:2, ", Y=", params.borderOffsetY:0:2, ") mm is too negative for this target.\n",
-                        "Target size: ", w:0:2, " x ", h:0:2, " mm -- offset would shrink the scan area to zero or less.");
+            reportFolder = StringOf("report/Mosaic_", params.scanName);
+            execResult = Exec(command = StringOf("cmd.exe /c mkdir \"", reportFolder, "\""), wait = 1);
+
+            if ShowGrabWindow() then begin
+
+                SetVideoSource(DEFAULT_VIDEO_SOURCE);
+                SetLiveVideo(on = true);
+                PositionAbsoluteZ(z = 0.0);    // retract before any XY sweep
+
+                Progress(mode = 1, title = "MosaicScan", value = 1);
+                tileNum = 0;
+                leftToRight = true;
+
+                for row = 0 to nRows - 1 do begin
+
+                    y = startY - row * stepY;
+
+                    for colIndex = 0 to nCols - 1 do begin
+
+                        if leftToRight then begin
+                            col = colIndex;
+                        end;
+                        else begin
+                            col = nCols - 1 - colIndex;
+                        end;
+
+                        x = startX - col * stepX;
+
+                        PositionAbsoluteXY(-1, x, y);
+                        TimerDelay(t = params.settleDelay);
+                        SetLiveVideo(on = false);
+
+                        // +1: filenames are 1-based to match Fiji's
+                        // default "First file index" of 1 (see header).
+                        // col's number goes after "r" and row's after
+                        // "c" -- swapped from the obvious reading -- so
+                        // that the Fiji pattern below can stay the
+                        // natural-looking tile_r{yy}_c{xx}.bmp; see the
+                        // camera-rotation header note for why.
+                        filename = StringOf(reportFolder, "/tile_r", Pad2(col + 1), "_c", Pad2(row + 1), ".bmp");
+                        SaveBitmap(filename);
+
+                        SetLiveVideo(on = true);
+
+                        tileNum = tileNum + 1;
+                        Progress(mode = 3, title = StringOf("Tile ", tileNum, " / ", nRows * nCols),
+                                 value = tileNum, min = 0, max = nRows * nCols);
+
+                    end;    // colIndex
+
+                    leftToRight = not leftToRight;
+
+                end;    // row
+
+                Progress(mode = -1, title = "", value = 0);
+
+                HideGrabWindow();
+
+                // Kept short -- NPL strings are capped at 256 chars, and
+                // a fuller summary here overflowed that (see the header
+                // comment for the full Fiji Type/Order/index settings).
+                // "Rows"/"Columns" here mean the real shape of the
+                // stitched mosaic (Fiji's Grid size y/x respectively) --
+                // NOT this script's row/col loop variables, which are
+                // swapped from that due to the camera rotation (see
+                // header note).
+                Message("MosaicScan finished",
+                        StringOf(nRows * nCols, " tiles saved to ", reportFolder, "\\.\n\n",
+                                  "Fiji: Rows=", nCols, " Columns=", nRows,
+                                  ", overlap=", params.overlap:0:1, "%, first index=1\n",
+                                  "tile_r{yy}_c{xx}.bmp"));
 
             end;
             else begin
 
-                // fovX/fovY swapped here on purpose: col drives stage-X, which
-                // is the camera's VERTICAL image axis (see camera-rotation
-                // note above), so col's spacing must come from fovY -- and
-                // symmetrically row's spacing comes from fovX.
-                stepX = params.fovY * (1.0 - params.overlap / 100.0);
-                stepY = params.fovX * (1.0 - params.overlap / 100.0);
+                Message("Error", "Framegrabber is not installed / could not be opened.");
 
-                nCols = TileCount(scanW, params.fovY, stepX);
-                nRows = TileCount(scanH, params.fovX, stepY);
+            end;    // if ShowGrabWindow
 
-                // Start at the far corner and count down (see header note on
-                // scan direction) so tile r01_c01 lands top-left, not
-                // bottom-right.
-                startX = cx + ((nCols - 1) * stepX) / 2.0;
-                startY = cy + ((nRows - 1) * stepY) / 2.0;
+        end;    // else if Confirmation
 
-                reportFolder = StringOf("report/Mosaic_", params.scanName);
-                execResult = Exec(command = StringOf("cmd.exe /c mkdir \"", reportFolder, "\""), wait = 1);
-
-                if ShowGrabWindow() then begin
-
-                    SetVideoSource(DEFAULT_VIDEO_SOURCE);
-                    SetLiveVideo(on = true);
-                    PositionAbsoluteZ(z = 0.0);    // retract before any XY sweep
-
-                    Progress(mode = 1, title = "MosaicScan", value = 1);
-                    tileNum = 0;
-                    leftToRight = true;
-
-                    for row = 0 to nRows - 1 do begin
-
-                        y = startY - row * stepY;
-
-                        for colIndex = 0 to nCols - 1 do begin
-
-                            if leftToRight then begin
-                                col = colIndex;
-                            end;
-                            else begin
-                                col = nCols - 1 - colIndex;
-                            end;
-
-                            x = startX - col * stepX;
-
-                            PositionAbsoluteXY(-1, x, y);
-                            TimerDelay(t = params.settleDelay);
-                            SetLiveVideo(on = false);
-
-                            // +1: filenames are 1-based to match Fiji's
-                            // default "First file index" of 1 (see header).
-                            // col's number goes after "r" and row's after
-                            // "c" -- swapped from the obvious reading -- so
-                            // that the Fiji pattern below can stay the
-                            // natural-looking tile_r{yy}_c{xx}.bmp; see the
-                            // camera-rotation header note for why.
-                            filename = StringOf(reportFolder, "/tile_r", Pad2(col + 1), "_c", Pad2(row + 1), ".bmp");
-                            SaveBitmap(filename);
-
-                            SetLiveVideo(on = true);
-
-                            tileNum = tileNum + 1;
-                            Progress(mode = 3, title = StringOf("Tile ", tileNum, " / ", nRows * nCols),
-                                     value = tileNum, min = 0, max = nRows * nCols);
-
-                        end;    // colIndex
-
-                        leftToRight = not leftToRight;
-
-                    end;    // row
-
-                    Progress(mode = -1, title = "", value = 0);
-
-                    HideGrabWindow();
-
-                    // Kept short -- NPL strings are capped at 256 chars, and
-                    // a fuller summary here overflowed that (see the header
-                    // comment for the full Fiji Type/Order/index settings).
-                    // Grid size X/Y intentionally nRows/nCols, not
-                    // nCols/nRows -- see header note on the camera/stage
-                    // 90 degree rotation.
-                    Message("MosaicScan finished",
-                            StringOf(nRows * nCols, " tiles saved to ", reportFolder, "\\.\n\n",
-                                      "Fiji: Grid size X=", nRows, " Y=", nCols,
-                                      ", overlap=", params.overlap:0:1, "%, first index=1\n",
-                                      "tile_r{yy}_c{xx}.bmp"));
-
-                end;
-                else begin
-
-                    Message("Error", "Framegrabber is not installed / could not be opened.");
-
-                end;    // if ShowGrabWindow
-
-            end;    // if scanW/scanH valid
-
-        end;    // if targetId
-
-    end;    // if Confirmation
+    end;    // if targetId
 
 end.
 
