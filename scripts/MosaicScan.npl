@@ -22,7 +22,7 @@ How it works:
   1. The target you want to scan (e.g. your 6x4 mm array) must already be
      registered on the work plate (System - Work Plate...) with its correct
      X/Y position and DimX/DimY size -- the program reads those
-     automatically via GetObjId/GetX/GetY/GetObjValue, so there is no need
+     automatically via GetObjId/GetObjValue, so there is no need
      to manually jog to a start position first.
   2. Enter the target's exact name (as shown in the Work Plate window), the
      camera's current field of view in mm, the desired tile overlap, and a
@@ -208,10 +208,10 @@ begin
         end;
         else begin
 
-            w = GetObjValue(object = targetId, index = 1);    // target width  (X)
-            h = GetObjValue(object = targetId, index = 2);    // target height (Y)
-            cx = GetX(object = targetId) + w / 2.0;            // target center X
-            cy = GetY(object = targetId) + h / 2.0;            // target center Y
+            w = GetObjValue(object = targetId, valueIndex = 1);    // target width  (X)
+            h = GetObjValue(object = targetId, valueIndex = 2);    // target height (Y)
+            cx = GetObjValue(object = targetId, valueIndex = 4) + w / 2.0;    // target center X
+            cy = GetObjValue(object = targetId, valueIndex = 5) + h / 2.0;    // target center Y
 
             stepX = params.fovX * (1.0 - params.overlap / 100.0);
             stepY = params.fovY * (1.0 - params.overlap / 100.0);
