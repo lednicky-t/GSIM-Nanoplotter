@@ -7,16 +7,20 @@ tiles can be stitched into one large overview image afterwards, e.g. with
 Fiji/ImageJ:
 
     Plugins > Stitching > Grid/Collection Stitching...
-    Type:        "Filename defined position"
-    Order:       "Right & Down"    (does not have to match physical travel
-                                     order below -- Fiji looks each file up
-                                     by its row/column number, not by when
-                                     it was captured)
-    Grid size X: <printed by this program at the end>
-    Grid size Y: <printed by this program at the end>
-    Tile overlap: <the % you entered below>
-    File names:  tile_r{yy}_c{xx}.bmp
-    Directory:   the report/Mosaic_<scan name> folder this program prints
+    Type:              "Filename defined position"
+    Grid size X:       <printed by this program at the end>
+    Grid size Y:       <printed by this program at the end>
+    Tile overlap:      <the % you entered below>
+    First file index x: 1
+    First file index y: 1
+    File names for tiles: tile_r{yy}_c{xx}.bmp
+    Directory:         the report/Mosaic_<scan name> folder this program prints
+
+    Row/column numbers in the saved filenames start at 1 (tile_r01_c01.bmp,
+    ...), matching Fiji's own default "First file index" of 1 above -- if
+    that field has been changed from its default in your Fiji install,
+    change it back to 1 (or update it to match whatever this program
+    actually wrote to the folder).
 
 How it works:
   1. The target you want to scan (e.g. your 6x4 mm array) must already be
@@ -362,7 +366,9 @@ begin
                             TimerDelay(t = params.settleDelay);
                             SetLiveVideo(on = false);
 
-                            filename = StringOf(reportFolder, "/tile_r", Pad2(row), "_c", Pad2(col), ".bmp");
+                            // +1: filenames are 1-based to match Fiji's
+                            // default "First file index" of 1 (see header).
+                            filename = StringOf(reportFolder, "/tile_r", Pad2(row + 1), "_c", Pad2(col + 1), ".bmp");
                             SaveBitmap(filename);
 
                             SetLiveVideo(on = true);
@@ -387,6 +393,7 @@ begin
                                       "  Grid size X: ", nCols, "\n",
                                       "  Grid size Y: ", nRows, "\n",
                                       "  Tile overlap: ", params.overlap:0:1, " %\n",
+                                      "  First file index x/y: 1\n",
                                       "  File names:   tile_r{yy}_c{xx}.bmp"));
 
                 end;
