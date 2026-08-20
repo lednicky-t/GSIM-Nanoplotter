@@ -41,6 +41,21 @@ How it works:
      minimize travel, saving one .bmp per position.
 
 Notes:
+  - Scan direction/start corner: tile r01_c01 (the first one saved) is meant
+    to land at this target's top-left corner, sweeping down to bottom-right
+    overall (snake pattern in between), so it lines up with Fiji's usual
+    top-left-is-(1,1) expectation. This was tuned from one observed run on
+    this machine (2026-08) where the untuned version started bottom-right
+    instead -- if a target is mounted rotated, or this ever runs on a
+    NanoPlotter with different stage-axis wiring, re-check which corner
+    tile r01_c01 actually lands on and flip the signs on startX/startY (and
+    the row/col step lines right after) if it's wrong again.
+  - This does NOT guarantee the stitched image itself isn't mirrored or
+    rotated relative to the real chip -- that depends on how the head
+    camera's video frame is oriented relative to the stage's X/Y axes,
+    which isn't something this program (or a code read) can determine.
+    Only an actual test stitch, compared by eye against the real target,
+    can confirm that.
   - The field of view is NOT read automatically -- it depends on the
     camera's current zoom/focus, which this repo has no scripted access to
     (CamViewConfig's scaling value lives in a separate, compiled tool, and
@@ -334,8 +349,11 @@ begin
                 nCols = TileCount(scanW, params.fovX, stepX);
                 nRows = TileCount(scanH, params.fovY, stepY);
 
-                startX = cx - ((nCols - 1) * stepX) / 2.0;
-                startY = cy - ((nRows - 1) * stepY) / 2.0;
+                // Start at the far corner and count down (see header note on
+                // scan direction) so tile r01_c01 lands top-left, not
+                // bottom-right.
+                startX = cx + ((nCols - 1) * stepX) / 2.0;
+                startY = cy + ((nRows - 1) * stepY) / 2.0;
 
                 reportFolder = StringOf("report/Mosaic_", params.scanName);
                 execResult = Exec(command = StringOf("cmd.exe /c mkdir \"", reportFolder, "\""), wait = 1);
@@ -352,7 +370,7 @@ begin
 
                     for row = 0 to nRows - 1 do begin
 
-                        y = startY + row * stepY;
+                        y = startY - row * stepY;
 
                         for colIndex = 0 to nCols - 1 do begin
 
@@ -363,7 +381,7 @@ begin
                                 col = nCols - 1 - colIndex;
                             end;
 
-                            x = startX + col * stepX;
+                            x = startX - col * stepX;
 
                             PositionAbsoluteXY(-1, x, y);
                             TimerDelay(t = params.settleDelay);
