@@ -25,8 +25,9 @@ How it works:
      automatically via GetObjId/GetObjValue, so there is no need
      to manually jog to a start position first.
   2. Enter the target's exact name (as shown in the Work Plate window), the
-     camera's current field of view in mm, the desired tile overlap, and a
-     name for this scan.
+     camera's current field of view (X only -- Y is computed from the fixed
+     camera aspect ratio), the desired tile overlap, an optional border
+     offset from the target's edges, and a name for this scan.
   3. The program computes a grid that fully covers the target, centered on
      it, creates report/Mosaic_<scan name>/, and steps through the grid in
      a snake pattern (left-right, then right-left on the next row, etc.) to
@@ -43,6 +44,11 @@ Notes:
     re-measure with CamViewConfig's [Scaling] tool (manual Ch. 10.3)
     whenever the zoom/focus changes, update that one constant, and double
     check the value in the dialog before confirming.
+  - Border offset (mm) grows or shrinks the scanned area relative to the
+    target's registered size, applied evenly on all four sides and centered
+    on the target: positive values scan a larger area than the target,
+    negative values scan a smaller area, 0 scans exactly the target's own
+    footprint.
   - This program only takes pictures. It never dispenses anything and never
     lowers Z beyond the retracted position.
   - If a folder with the same scan name already exists, its files may be
@@ -75,6 +81,7 @@ type MosaicParameters = record
     fovX:         real;
     fovY:         real;
     overlap:      real;
+    borderOffset: real;
     scanName:     string;
     settleDelay:  real;
 end;
@@ -83,7 +90,7 @@ var params:       MosaicParameters;
 var reportFolder: string;
 
 var targetId: integer;
-var cx, cy, w, h: real;
+var cx, cy, w, h, scanW, scanH: real;
 var stepX, stepY: real;
 var nCols, nRows: integer;
 var startX, startY: real;
@@ -102,12 +109,13 @@ var ok: boolean;
 
 begin
 
-    default.targetName  = "Array1";
-    default.fovX        = DEFAULT_FOV_X;
-    default.fovY        = DEFAULT_FOV_X * CAMERA_ASPECT_Y / CAMERA_ASPECT_X;
-    default.overlap     = 12.0;
-    default.scanName    = "Scan1";
-    default.settleDelay = 0.3;
+    default.targetName   = "CHIPS";
+    default.fovX         = DEFAULT_FOV_X;
+    default.fovY         = DEFAULT_FOV_X * CAMERA_ASPECT_Y / CAMERA_ASPECT_X;
+    default.overlap      = 12.0;
+    default.borderOffset = 0.0;
+    default.scanName     = "Scan1";
+    default.settleDelay  = 0.3;
 
     p = default;
     ok = false;
@@ -117,14 +125,16 @@ begin
         Window("Mosaic scan setup",
                "Work plate target name to scan:", p.targetName,
                "Camera field of view, X (mm):", p.fovX,
-               "Camera field of view, Y (mm):", p.fovY,
                "Tile overlap (%):", p.overlap,
+               "Border offset from target edges (mm, + = larger, - = smaller):", p.borderOffset,
                "Name for this scan (used for the output folder):", p.scanName,
                "Settle delay after each move (s):", p.settleDelay);
 
+        p.fovY = p.fovX * CAMERA_ASPECT_Y / CAMERA_ASPECT_X;    // not editable -- derived from X
+
         ok = true;
 
-        if (p.fovX <= 0.0) or (p.fovY <= 0.0) then begin
+        if p.fovX <= 0.0 then begin
 
             Message("Error", "Field of view must be greater than 0 mm.");
             ok = false;
@@ -213,80 +223,95 @@ begin
             cx = GetObjValue(object = targetId, valueIndex = 4) + w / 2.0;    // target center X
             cy = GetObjValue(object = targetId, valueIndex = 5) + h / 2.0;    // target center Y
 
-            stepX = params.fovX * (1.0 - params.overlap / 100.0);
-            stepY = params.fovY * (1.0 - params.overlap / 100.0);
+            // Offset applied evenly on all four sides, so the scan stays
+            // centered on cx/cy regardless of its sign.
+            scanW = w + 2.0 * params.borderOffset;
+            scanH = h + 2.0 * params.borderOffset;
 
-            nCols = TileCount(w, params.fovX, stepX);
-            nRows = TileCount(h, params.fovY, stepY);
+            if (scanW <= 0.0) or (scanH <= 0.0) then begin
 
-            startX = cx - ((nCols - 1) * stepX) / 2.0;
-            startY = cy - ((nRows - 1) * stepY) / 2.0;
-
-            reportFolder = StringOf("report/Mosaic_", params.scanName);
-            execResult = Exec(command = StringOf("cmd.exe /c mkdir \"", reportFolder, "\""), wait = 1);
-
-            if ShowGrabWindow() then begin
-
-                SetVideoSource(DEFAULT_VIDEO_SOURCE);
-                SetLiveVideo(on = true);
-                PositionAbsoluteZ(z = 0.0);    // retract before any XY sweep
-
-                Progress(mode = 1, title = "MosaicScan", value = 1);
-                tileNum = 0;
-                leftToRight = true;
-
-                for row = 0 to nRows - 1 do begin
-
-                    y = startY + row * stepY;
-
-                    for colIndex = 0 to nCols - 1 do begin
-
-                        if leftToRight then begin
-                            col = colIndex;
-                        end;
-                        else begin
-                            col = nCols - 1 - colIndex;
-                        end;
-
-                        x = startX + col * stepX;
-
-                        PositionAbsoluteXY(-1, x, y);
-                        TimerDelay(t = params.settleDelay);
-                        SetLiveVideo(on = false);
-
-                        filename = StringOf(reportFolder, "/tile_r", Pad2(row), "_c", Pad2(col), ".bmp");
-                        SaveBitmap(filename);
-
-                        SetLiveVideo(on = true);
-
-                        tileNum = tileNum + 1;
-                        Progress(mode = 3, title = StringOf("Tile ", tileNum, " / ", nRows * nCols),
-                                 value = tileNum, min = 0, max = nRows * nCols);
-
-                    end;    // colIndex
-
-                    leftToRight = not leftToRight;
-
-                end;    // row
-
-                Progress(mode = -1, title = "", value = 0);
-
-                HideGrabWindow();
-
-                Message("MosaicScan finished",
-                        StringOf(nRows * nCols, " tiles saved to ", reportFolder, "\\.\n\n",
-                                  "Fiji Grid/Collection Stitching settings:\n",
-                                  "  Grid size X: ", nCols, "\n",
-                                  "  Grid size Y: ", nRows, "\n",
-                                  "  Tile overlap: ", params.overlap:0:1, " %\n",
-                                  "  File names:   tile_r{yy}_c{xx}.bmp"));
+                Message("Error", "Border offset of ", params.borderOffset:0:2, " mm is too negative for this target.\n",
+                        "Target size: ", w:0:2, " x ", h:0:2, " mm -- offset would shrink the scan area to zero or less.");
 
             end;
             else begin
 
-                Message("Error", "Framegrabber is not installed / could not be opened.");
+                stepX = params.fovX * (1.0 - params.overlap / 100.0);
+                stepY = params.fovY * (1.0 - params.overlap / 100.0);
 
-            end;    // if ShowGrabWindow
+                nCols = TileCount(scanW, params.fovX, stepX);
+                nRows = TileCount(scanH, params.fovY, stepY);
+
+                startX = cx - ((nCols - 1) * stepX) / 2.0;
+                startY = cy - ((nRows - 1) * stepY) / 2.0;
+
+                reportFolder = StringOf("report/Mosaic_", params.scanName);
+                execResult = Exec(command = StringOf("cmd.exe /c mkdir \"", reportFolder, "\""), wait = 1);
+
+                if ShowGrabWindow() then begin
+
+                    SetVideoSource(DEFAULT_VIDEO_SOURCE);
+                    SetLiveVideo(on = true);
+                    PositionAbsoluteZ(z = 0.0);    // retract before any XY sweep
+
+                    Progress(mode = 1, title = "MosaicScan", value = 1);
+                    tileNum = 0;
+                    leftToRight = true;
+
+                    for row = 0 to nRows - 1 do begin
+
+                        y = startY + row * stepY;
+
+                        for colIndex = 0 to nCols - 1 do begin
+
+                            if leftToRight then begin
+                                col = colIndex;
+                            end;
+                            else begin
+                                col = nCols - 1 - colIndex;
+                            end;
+
+                            x = startX + col * stepX;
+
+                            PositionAbsoluteXY(-1, x, y);
+                            TimerDelay(t = params.settleDelay);
+                            SetLiveVideo(on = false);
+
+                            filename = StringOf(reportFolder, "/tile_r", Pad2(row), "_c", Pad2(col), ".bmp");
+                            SaveBitmap(filename);
+
+                            SetLiveVideo(on = true);
+
+                            tileNum = tileNum + 1;
+                            Progress(mode = 3, title = StringOf("Tile ", tileNum, " / ", nRows * nCols),
+                                     value = tileNum, min = 0, max = nRows * nCols);
+
+                        end;    // colIndex
+
+                        leftToRight = not leftToRight;
+
+                    end;    // row
+
+                    Progress(mode = -1, title = "", value = 0);
+
+                    HideGrabWindow();
+
+                    Message("MosaicScan finished",
+                            StringOf(nRows * nCols, " tiles saved to ", reportFolder, "\\.\n\n",
+                                      "Fiji Grid/Collection Stitching settings:\n",
+                                      "  Grid size X: ", nCols, "\n",
+                                      "  Grid size Y: ", nRows, "\n",
+                                      "  Tile overlap: ", params.overlap:0:1, " %\n",
+                                      "  File names:   tile_r{yy}_c{xx}.bmp"));
+
+                end;
+                else begin
+
+                    Message("Error", "Framegrabber is not installed / could not be opened.");
+
+                end;    // if ShowGrabWindow
+
+            end;    // if scanW/scanH valid
 
         end;    // if targetId
 
