@@ -26,8 +26,8 @@ How it works:
      to manually jog to a start position first.
   2. Enter the target's exact name (as shown in the Work Plate window), the
      camera's current field of view (X only -- Y is computed from the fixed
-     camera aspect ratio), the desired tile overlap, an optional border
-     offset from the target's edges, and a name for this scan.
+     camera aspect ratio), the desired tile overlap, optional X/Y border
+     offsets from the target's edges, and a name for this scan.
   3. The program computes a grid that fully covers the target, centered on
      it, creates report/Mosaic_<scan name>/, and steps through the grid in
      a snake pattern (left-right, then right-left on the next row, etc.) to
@@ -44,16 +44,19 @@ Notes:
     re-measure with CamViewConfig's [Scaling] tool (manual Ch. 10.3)
     whenever the zoom/focus changes, update that one constant, and double
     check the value in the dialog before confirming.
-  - Border offset (mm) grows or shrinks the scanned area relative to the
-    target's registered size, applied evenly on all four sides and centered
-    on the target: positive values scan a larger area than the target,
-    negative values scan a smaller area, 0 scans exactly the target's own
-    footprint.
+  - Border offset X/Y (mm) grows or shrinks the scanned area relative to the
+    target's registered size, applied evenly on both sides of that axis and
+    centered on the target: positive values scan a larger area than the
+    target, negative values scan a smaller area, 0 scans exactly the
+    target's own size on that axis.
   - This program only takes pictures. It never dispenses anything and never
     lowers Z beyond the retracted position.
   - If a folder with the same scan name already exists, its files may be
     overwritten -- pick a fresh scan name for each run if you want to keep
     old tiles.
+  - The setup dialog remembers the values from your last run, saved to
+    Data/MosaicScan.set (created automatically -- delete it to reset
+    everything back to the built-in defaults below).
 */
 
 program MosaicScan;
@@ -77,13 +80,14 @@ const CAMERA_ASPECT_X = 768.0;
 const CAMERA_ASPECT_Y = 576.0;
 
 type MosaicParameters = record
-    targetName:   string;
-    fovX:         real;
-    fovY:         real;
-    overlap:      real;
-    borderOffset: real;
-    scanName:     string;
-    settleDelay:  real;
+    targetName:    string;
+    fovX:          real;
+    fovY:          real;
+    overlap:       real;
+    borderOffsetX: real;
+    borderOffsetY: real;
+    scanName:      string;
+    settleDelay:   real;
 end;
 
 var params:       MosaicParameters;
@@ -106,18 +110,81 @@ function Setup(): MosaicParameters;
 
 var p, default: MosaicParameters;
 var ok: boolean;
+var settingsFName, line, lineContent: string;
+var settingFile: file;
+var posEqual: integer;
+var lineReal: real;
 
 begin
 
-    default.targetName   = "CHIPS";
-    default.fovX         = DEFAULT_FOV_X;
-    default.fovY         = DEFAULT_FOV_X * CAMERA_ASPECT_Y / CAMERA_ASPECT_X;
-    default.overlap      = 12.0;
-    default.borderOffset = 0.0;
-    default.scanName     = "Scan1";
-    default.settleDelay  = 0.3;
+    default.targetName    = "CHIPS";
+    default.fovX          = DEFAULT_FOV_X;
+    default.fovY          = DEFAULT_FOV_X * CAMERA_ASPECT_Y / CAMERA_ASPECT_X;
+    default.overlap       = 12.0;
+    default.borderOffsetX = 0.0;
+    default.borderOffsetY = 0.0;
+    default.scanName      = "Scan1";
+    default.settleDelay   = 0.3;
 
     p = default;
+    settingsFName = "Data/MosaicScan.set";
+
+    // Load the last-used values, if any, so the dialog below starts out
+    // pre-filled with them instead of always resetting to the defaults
+    // above. Any key that's missing or fails its range check falls back to
+    // the default already in p, same as a first-ever run.
+    settingFile = OpenR(filename = settingsFName);
+
+    if FileState(settingFile) <> -1 then begin
+
+        while FileState(settingFile) > 0 do begin
+
+            line = Getln(f = settingFile);
+            posEqual = FindString(sToSearch = line, sToFind = "=");
+
+            if posEqual <> -1 then begin
+
+                lineContent = Substring(s = line, iBeg = 0, iEnd = posEqual);
+
+                if ToUpper(lineContent) == "TARGETNAME" then begin
+                    p.targetName = Substring(line, posEqual + 1, -1);
+                end;
+                else
+                if ToUpper(lineContent) == "FOVX" then begin
+                    lineReal = StringToReal(s = Substring(line, posEqual + 1, -1));
+                    if lineReal > 0.0 then p.fovX = lineReal;
+                end;
+                else
+                if ToUpper(lineContent) == "OVERLAP" then begin
+                    lineReal = StringToReal(s = Substring(line, posEqual + 1, -1));
+                    if (lineReal >= 0.0) and (lineReal < 90.0) then p.overlap = lineReal;
+                end;
+                else
+                if ToUpper(lineContent) == "BORDEROFFSETX" then begin
+                    p.borderOffsetX = StringToReal(s = Substring(line, posEqual + 1, -1));
+                end;
+                else
+                if ToUpper(lineContent) == "BORDEROFFSETY" then begin
+                    p.borderOffsetY = StringToReal(s = Substring(line, posEqual + 1, -1));
+                end;
+                else
+                if ToUpper(lineContent) == "SCANNAME" then begin
+                    p.scanName = Substring(line, posEqual + 1, -1);
+                end;
+                else
+                if ToUpper(lineContent) == "SETTLEDELAY" then begin
+                    lineReal = StringToReal(s = Substring(line, posEqual + 1, -1));
+                    if (lineReal >= 0.0) and (lineReal <= 10.0) then p.settleDelay = lineReal;
+                end;
+
+            end;    // if posEqual
+
+        end;    // while
+
+        Close(settingFile);
+
+    end;    // if FileState
+
     ok = false;
 
     while not ok do begin
@@ -126,7 +193,8 @@ begin
                "Work plate target name to scan:", p.targetName,
                "Camera field of view, X (mm):", p.fovX,
                "Tile overlap (%):", p.overlap,
-               "Border offset from target edges (mm, + = larger, - = smaller):", p.borderOffset,
+               "Border offset from target edges, X (mm, + = larger, - = smaller):", p.borderOffsetX,
+               "Border offset from target edges, Y (mm, + = larger, - = smaller):", p.borderOffsetY,
                "Name for this scan (used for the output folder):", p.scanName,
                "Settle delay after each move (s):", p.settleDelay);
 
@@ -154,6 +222,23 @@ begin
         end;
 
     end;    // while
+
+    // Save the now-validated values so the next run starts from here.
+    settingFile = OpenRW(filename = settingsFName);
+
+    if FileState(settingFile) <> -1 then begin
+
+        Putln(f = settingFile, s = StringOf("targetName=", p.targetName));
+        Putln(f = settingFile, s = StringOf("fovX=", p.fovX));
+        Putln(f = settingFile, s = StringOf("overlap=", p.overlap));
+        Putln(f = settingFile, s = StringOf("borderOffsetX=", p.borderOffsetX));
+        Putln(f = settingFile, s = StringOf("borderOffsetY=", p.borderOffsetY));
+        Putln(f = settingFile, s = StringOf("scanName=", p.scanName));
+        Putln(f = settingFile, s = StringOf("settleDelay=", p.settleDelay));
+
+        Close(settingFile);
+
+    end;    // if FileState
 
     Setup = p;
 
@@ -223,14 +308,14 @@ begin
             cx = GetObjValue(object = targetId, valueIndex = 4) + w / 2.0;    // target center X
             cy = GetObjValue(object = targetId, valueIndex = 5) + h / 2.0;    // target center Y
 
-            // Offset applied evenly on all four sides, so the scan stays
-            // centered on cx/cy regardless of its sign.
-            scanW = w + 2.0 * params.borderOffset;
-            scanH = h + 2.0 * params.borderOffset;
+            // Offset applied evenly on both sides of each axis, so the scan
+            // stays centered on cx/cy regardless of sign.
+            scanW = w + 2.0 * params.borderOffsetX;
+            scanH = h + 2.0 * params.borderOffsetY;
 
             if (scanW <= 0.0) or (scanH <= 0.0) then begin
 
-                Message("Error", "Border offset of ", params.borderOffset:0:2, " mm is too negative for this target.\n",
+                Message("Error", "Border offset (X=", params.borderOffsetX:0:2, ", Y=", params.borderOffsetY:0:2, ") mm is too negative for this target.\n",
                         "Target size: ", w:0:2, " x ", h:0:2, " mm -- offset would shrink the scan area to zero or less.");
 
             end;
