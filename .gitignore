@@ -3,6 +3,10 @@
 # existing Prog/ scripts) but not tracked in git — see README.md.
 /Spotter/
 
+# Local Fiji/ImageJ install, kept for inspecting the Stitching plugin
+# (765 MB of vendor binaries/JARs -- not tracked in git).
+/Fiji/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

@@ -7,14 +7,17 @@ tiles can be stitched into one large overview image afterwards, e.g. with
 Fiji/ImageJ:
 
     Plugins > Stitching > Grid/Collection Stitching...
-    Type:              "Filename defined position"
-    Grid size X:       <printed by this program at the end>
-    Grid size Y:       <printed by this program at the end>
-    Tile overlap:      <the % you entered below>
-    First file index x: 1
-    First file index y: 1
-    File names for tiles: tile_r{yy}_c{xx}.bmp
-    Directory:         the report/Mosaic_<scan name> folder this program prints
+    Type:                  "Filename defined position"
+    Order:                 "Defined by filename"    (NOT one of the
+                             "Right & Down" style choices -- those are
+                             only for the "Grid: ..." Types, not this one)
+    Grid size x:           <printed by this program at the end>
+    Grid size y:           <printed by this program at the end>
+    Tile overlap [%]:      <the % you entered below>
+    First file index x:    1
+    First file index y:    1
+    File names for tiles:  tile_r{yy}_c{xx}.bmp
+    Directory:              the report/Mosaic_<scan name> folder this program prints
 
     Row/column numbers in the saved filenames start at 1 (tile_r01_c01.bmp,
     ...), matching Fiji's own default "First file index" of 1 above -- if
@@ -390,8 +393,10 @@ begin
                     Message("MosaicScan finished",
                             StringOf(nRows * nCols, " tiles saved to ", reportFolder, "\\.\n\n",
                                       "Fiji Grid/Collection Stitching settings:\n",
-                                      "  Grid size X: ", nCols, "\n",
-                                      "  Grid size Y: ", nRows, "\n",
+                                      "  Type:         Filename defined position\n",
+                                      "  Order:        Defined by filename\n",
+                                      "  Grid size X:  ", nCols, "\n",
+                                      "  Grid size Y:  ", nRows, "\n",
                                       "  Tile overlap: ", params.overlap:0:1, " %\n",
                                       "  First file index x/y: 1\n",
                                       "  File names:   tile_r{yy}_c{xx}.bmp"));
