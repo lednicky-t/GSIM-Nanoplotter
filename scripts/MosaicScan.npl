@@ -13,14 +13,13 @@ Fiji/ImageJ:
                              only for the "Grid: ..." Types, not this one)
     Grid size x:           <printed by this program at the end -- this is
                              the row count, NOT the column count, see the
-                             scan-direction note below>
+                             camera-rotation note below>
     Grid size y:           <printed by this program at the end -- this is
                              the column count>
     Tile overlap [%]:      <the % you entered below>
     First file index x:    1
     First file index y:    1
-    File names for tiles:  tile_r{xx}_c{yy}.bmp    (NOT r{yy}_c{xx} -- see
-                             the camera-rotation note below)
+    File names for tiles:  tile_r{yy}_c{xx}.bmp
     Directory:              the report/Mosaic_<scan name> folder this program prints
 
     Row/column numbers in the saved filenames start at 1 (tile_r01_c01.bmp,
@@ -58,16 +57,18 @@ Notes:
     up as VERTICAL movement in the camera image, and stage-Y motion as
     HORIZONTAL movement (confirmed separately, not guessed --
     WSPCheck_TipCheck_Calibration_Notes.md section 6.2, "cursor left-right
-    <-> stage Y, cursor top-down <-> stage X"). Since this script's "col"
-    variable drives stage-X and "row" drives stage-Y, that means col's
-    number is really the image's vertical/Fiji-y coordinate and row's
-    number is really the image's horizontal/Fiji-x coordinate -- backwards
-    from the obvious reading of "row/column". That's why the Fiji file name
-    pattern above is tile_r{xx}_c{yy}.bmp (not r{yy}_c{xx}) and Grid size
-    x/y are swapped from what you'd expect. The same rotation also means
-    col's step size (stepX) is built from fovY and row's (stepY) from fovX
-    -- swapped from the naive reading -- confirmed 2026-08 by comparing two
-    real adjacent tiles and finding col's overlap only matched fovY. If
+    <-> stage Y, cursor top-down <-> stage X"; re-confirmed 2026-08 by
+    comparing two real adjacent tiles). Since this script's "col" variable
+    drives stage-X and "row" drives stage-Y, col's number is really the
+    image's vertical/Fiji-y coordinate and row's number is really the
+    image's horizontal/Fiji-x coordinate. To keep the Fiji file name
+    pattern itself looking like the obvious tile_r{yy}_c{xx}.bmp, the
+    swap is absorbed into the filename instead: col's count is written
+    after "r" and row's count after "c" (see the SaveBitmap line below) --
+    Grid size x/y stay nRows/nCols regardless, since those track which
+    Fiji placeholder ({xx}/{yy}) is used, not which prefix letter carries
+    it. The same rotation also means col's step size (stepX) is built from
+    fovY and row's (stepY) from fovX -- swapped from the naive reading. If
     this ever runs on a NanoPlotter without this same camera mounting,
     re-derive this from scratch rather than assuming it still applies.
   - The field of view is NOT read automatically -- it depends on the
@@ -407,7 +408,12 @@ begin
 
                             // +1: filenames are 1-based to match Fiji's
                             // default "First file index" of 1 (see header).
-                            filename = StringOf(reportFolder, "/tile_r", Pad2(row + 1), "_c", Pad2(col + 1), ".bmp");
+                            // col's number goes after "r" and row's after
+                            // "c" -- swapped from the obvious reading -- so
+                            // that the Fiji pattern below can stay the
+                            // natural-looking tile_r{yy}_c{xx}.bmp; see the
+                            // camera-rotation header note for why.
+                            filename = StringOf(reportFolder, "/tile_r", Pad2(col + 1), "_c", Pad2(row + 1), ".bmp");
                             SaveBitmap(filename);
 
                             SetLiveVideo(on = true);
@@ -429,14 +435,14 @@ begin
                     // Kept short -- NPL strings are capped at 256 chars, and
                     // a fuller summary here overflowed that (see the header
                     // comment for the full Fiji Type/Order/index settings).
-                    // Grid size X/Y intentionally swapped vs nCols/nRows,
-                    // and r{xx}_c{yy} not r{yy}_c{xx} -- see header note on
-                    // the camera/stage 90 degree rotation.
+                    // Grid size X/Y intentionally nRows/nCols, not
+                    // nCols/nRows -- see header note on the camera/stage
+                    // 90 degree rotation.
                     Message("MosaicScan finished",
                             StringOf(nRows * nCols, " tiles saved to ", reportFolder, "\\.\n\n",
                                       "Fiji: Grid size X=", nRows, " Y=", nCols,
                                       ", overlap=", params.overlap:0:1, "%, first index=1\n",
-                                      "tile_r{xx}_c{yy}.bmp"));
+                                      "tile_r{yy}_c{xx}.bmp"));
 
                 end;
                 else begin
