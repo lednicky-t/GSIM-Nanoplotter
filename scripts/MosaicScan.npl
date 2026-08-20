@@ -408,16 +408,14 @@ begin
 
                     HideGrabWindow();
 
+                    // Kept short -- NPL strings are capped at 256 chars, and
+                    // a fuller summary here overflowed that (see the header
+                    // comment for the full Fiji Type/Order/index settings).
                     Message("MosaicScan finished",
                             StringOf(nRows * nCols, " tiles saved to ", reportFolder, "\\.\n\n",
-                                      "Fiji Grid/Collection Stitching settings:\n",
-                                      "  Type:         Filename defined position\n",
-                                      "  Order:        Defined by filename\n",
-                                      "  Grid size X:  ", nCols, "\n",
-                                      "  Grid size Y:  ", nRows, "\n",
-                                      "  Tile overlap: ", params.overlap:0:1, " %\n",
-                                      "  First file index x/y: 1\n",
-                                      "  File names:   tile_r{yy}_c{xx}.bmp"));
+                                      "Fiji: Grid size X=", nCols, " Y=", nRows,
+                                      ", overlap=", params.overlap:0:1, "%, first index=1\n",
+                                      "tile_r{yy}_c{xx}.bmp"));
 
                 end;
                 else begin
