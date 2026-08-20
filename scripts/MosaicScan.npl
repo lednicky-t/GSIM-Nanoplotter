@@ -11,12 +11,16 @@ Fiji/ImageJ:
     Order:                 "Defined by filename"    (NOT one of the
                              "Right & Down" style choices -- those are
                              only for the "Grid: ..." Types, not this one)
-    Grid size x:           <printed by this program at the end>
-    Grid size y:           <printed by this program at the end>
+    Grid size x:           <printed by this program at the end -- this is
+                             the row count, NOT the column count, see the
+                             scan-direction note below>
+    Grid size y:           <printed by this program at the end -- this is
+                             the column count>
     Tile overlap [%]:      <the % you entered below>
     First file index x:    1
     First file index y:    1
-    File names for tiles:  tile_r{yy}_c{xx}.bmp
+    File names for tiles:  tile_r{xx}_c{yy}.bmp    (NOT r{yy}_c{xx} -- see
+                             the camera-rotation note below)
     Directory:              the report/Mosaic_<scan name> folder this program prints
 
     Row/column numbers in the saved filenames start at 1 (tile_r01_c01.bmp,
@@ -50,12 +54,19 @@ Notes:
     NanoPlotter with different stage-axis wiring, re-check which corner
     tile r01_c01 actually lands on and flip the signs on startX/startY (and
     the row/col step lines right after) if it's wrong again.
-  - This does NOT guarantee the stitched image itself isn't mirrored or
-    rotated relative to the real chip -- that depends on how the head
-    camera's video frame is oriented relative to the stage's X/Y axes,
-    which isn't something this program (or a code read) can determine.
-    Only an actual test stitch, compared by eye against the real target,
-    can confirm that.
+  - Camera/stage 90 degree rotation: on this machine, stage-X motion shows
+    up as VERTICAL movement in the camera image, and stage-Y motion as
+    HORIZONTAL movement (confirmed separately, not guessed --
+    WSPCheck_TipCheck_Calibration_Notes.md section 6.2, "cursor left-right
+    <-> stage Y, cursor top-down <-> stage X"). Since this script's "col"
+    variable drives stage-X and "row" drives stage-Y, that means col's
+    number is really the image's vertical/Fiji-y coordinate and row's
+    number is really the image's horizontal/Fiji-x coordinate -- backwards
+    from the obvious reading of "row/column". That's why the Fiji file name
+    pattern above is tile_r{xx}_c{yy}.bmp (not r{yy}_c{xx}) and Grid size
+    x/y are swapped from what you'd expect. If this ever runs on a
+    NanoPlotter without this same camera mounting, re-derive this from
+    scratch rather than assuming it still applies.
   - The field of view is NOT read automatically -- it depends on the
     camera's current zoom/focus, which this repo has no scripted access to
     (CamViewConfig's scaling value lives in a separate, compiled tool, and
@@ -411,11 +422,14 @@ begin
                     // Kept short -- NPL strings are capped at 256 chars, and
                     // a fuller summary here overflowed that (see the header
                     // comment for the full Fiji Type/Order/index settings).
+                    // Grid size X/Y intentionally swapped vs nCols/nRows,
+                    // and r{xx}_c{yy} not r{yy}_c{xx} -- see header note on
+                    // the camera/stage 90 degree rotation.
                     Message("MosaicScan finished",
                             StringOf(nRows * nCols, " tiles saved to ", reportFolder, "\\.\n\n",
-                                      "Fiji: Grid size X=", nCols, " Y=", nRows,
+                                      "Fiji: Grid size X=", nRows, " Y=", nCols,
                                       ", overlap=", params.overlap:0:1, "%, first index=1\n",
-                                      "tile_r{yy}_c{xx}.bmp"));
+                                      "tile_r{xx}_c{yy}.bmp"));
 
                 end;
                 else begin
