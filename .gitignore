@@ -1,0 +1,9 @@
+# Working copy of the NPC16 installation from the lab PC.
+# Kept locally as reference (binaries, manuals, historical Data/Report logs,
+# existing Prog/ scripts) but not tracked in git — see README.md.
+/Spotter/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.tmp
