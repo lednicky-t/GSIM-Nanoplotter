@@ -1,0 +1,475 @@
+/**
+PipetteAngleCheck
+
+Purpose: measure how a tip's pipette-to-camera XY correction (dx, dy), as
+computed by CalibratePipettes() and stored in NPC16.INI [Head]
+correctionX<tip>/correctionY<tip>, depends on the commanded Z-gap (distance
+above the live-measured WSP surface). If a tip is physically tilted rather
+than perfectly vertical, dx/dy will drift roughly linearly with Z (see
+lateral = deltaZ * tan(angle)); fitting a line through dx-vs-Z and dy-vs-Z
+recovers that angle directly. This automates, in one script, the manual
+Z-sweep procedure documented in WSPCheck_TipCheck_Calibration_Notes.md,
+section 9 -- that investigation found real per-axis slopes around 0.02-0.11
+mm/mm (equivalent angle a few degrees), so this is not a hypothetical effect
+on this instrument.
+
+Target WSP on workplate required (same as WSPCheck/TipCheck) and you need to
+know its Z has been measured at least once ("Work Plate -> Measure
+Z-Levels...").
+
+How it works:
+  1. Reads the live WSP surface Z once (GetZ), same as WSPCheck/TipCheck.
+  2. For each Z-gap in Z_GAP_START..Z_GAP_END (step Z_GAP_STEP), repeats
+     CalibratePipettes() REPEATS_PER_HEIGHT times at that height. Repeats
+     are not independent measurements -- CalibratePipettes nudges the
+     existing correction table towards the true value each call (a closed
+     loop), so only the LAST repeat at each height is used as that height's
+     data point, on the assumption it is the most converged. Every repeat is
+     still logged, so you can check convergence yourself afterwards --if the
+     values are still moving a lot between repeat 2 and 3, increase
+     REPEATS_PER_HEIGHT (the calibration notes needed >5 repeats in one
+     session to see it settle).
+  3. After the sweep, for each enabled tip with enough points, fits a
+     straight line to dx vs Z and to dy vs Z (least squares) and reports the
+     slope as an equivalent tilt angle via ArcTan(slope).
+  4. Writes two CSV files under report/PipetteAngleCheck_<run name>/ :
+     raw.csv (every gap/repeat/tip point) and fit.csv (the per-tip fit
+     summary) -- for a proper analysis (weighted fit, uncertainty, plots)
+     in Excel/Python afterwards, rather than trusting only the on-screen
+     ArcTan number.
+
+Assumptions carried over unchanged from WSPCheck/TipCheck, not re-verified
+here: CalibratePipettes()'s own accuracy/behavior. tip_list is set to [1]
+(tip 1 only) at the CalibratePipettes(...) call below -- that is the only
+tip with a nonzero correction on this rig per the calibration notes; edit
+that line (marked TIP_LIST_EDIT_HERE) to broaden it to other tips or [] for
+"all enabled tips".
+
+Not yet run on the instrument -- verify the very first sweep step by hand
+(check report window output looks sane, check NPC16.INI's correctionX1/Y1
+after the first calibration call actually changed) before trusting a full
+unattended run. In particular: this script reads NPC16.INI directly with
+plain file I/O (OpenR) while the very same NanoPlotter engine that has it
+open is running this script -- expected to work (this repo's own
+investigation notes were built by reading this same file's [Head] section
+by hand while the instrument was in use), but if OpenR/ReadSetupFile ever
+reports a failure here, that means the engine is holding it locked in a way
+that blocks a second read, and the correction read-back will not work --
+the on-screen -9999 sentinel warnings below exist to catch that instead of
+silently logging garbage.
+
+Built-in cross-check, GetTipX/GetTipY vs. the NPC16.INI read: GetTipX(tip)
+and GetTipY(tip) are real, documented-signature-only (no prose anywhere in
+the manual) native functions. The only real usage found in this repo
+(Prog/TSMP/TransferSim_SpottingSOF_08C11.inc, CalculateRefTipPosition)
+computes GetTipX(curTip) - GetTipX(refTip) as a tip-to-tip offset used to
+predict where a spot should land -- which only makes sense if GetTipX/Y
+already reflect whatever the alignment table has corrected that tip to, not
+a fixed uncorrected geometric constant. If true, GetTipX/GetTipY would be a
+strictly better source than parsing NPC16.INI: no file I/O, no dependency on
+MAX_SETUP_ENTRIES covering the whole file, no risk of the engine holding the
+file locked. But this is inferred from one usage site, not documented, so
+rather than switch to it on faith, this script logs both sources on every
+point (raw.csv has both correctionX/Y-from-INI and GetTipX/Y columns) and
+fits both independently (fit.csv / report window show both). Compare the two
+slopes/angles after a run: if they agree, GetTipX/GetTipY is confirmed as a
+safe replacement for the INI read in a future version of this script; if
+they diverge, keep using the INI read (already proven, if slower to trust)
+and treat GetTipX/GetTipY as unexplained.
+
+Copyright notes as in WSPCheck.npl/TipCheck.npl: pattern based on GeSiM's
+own sample programs.
+**/
+
+program PipetteAngleCheck;
+
+//  Change the next line if your target has a different name than WSP1:
+const WATER_SENSITIVE_PAPER = WSP1;
+
+//  Which tips to run CalibratePipettes() on: edit the "tip_list = [1]"
+//  argument in the CalibratePipettes(...) call further down (search for
+//  TIP_LIST_EDIT_HERE). [1] = tip 1 only (this rig's only actively-used tip
+//  per the calibration notes); [] = all enabled tips; [1,2,5] for a subset.
+//  (Kept as an inline literal at the call site, not a named const, because
+//  every existing script in this repo only ever uses the "[...]" tip-list
+//  syntax inline -- there is no working example of assigning it to a const
+//  first, so this does not risk relying on untested syntax.)
+
+//  Z-gap sweep, mm above the live-measured WSP surface. NUM_GAPS must match
+//  how many steps Z_GAP_START..Z_GAP_END/Z_GAP_STEP actually produces --
+//  it is not computed automatically, so keep it in sync if you change the
+//  three values above it.
+const Z_GAP_START = 0.3;
+const Z_GAP_STEP   = 0.1;
+const NUM_GAPS      = 8;    // 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
+
+const REPEATS_PER_HEIGHT = 3;
+const DROPLETS = 1;     // manual's own "smallest possible value" advice, matches section 8 of the notes
+const DRY_DELAY = 5.0;  // seconds, matches WSPCheck's default
+
+const NUM_TIPS = 16;
+
+//  NPC16.INI currently has ~690 "key=value" lines total; Setup.inc's
+//  ReadSetupFile() silently stops (with an on-screen error) once it hits
+//  MAX_SETUP_ENTRIES, long before reaching [Head] if this is left at
+//  TipCheck's default of 100. Kept generously above the current size.
+const MAX_SETUP_ENTRIES = 900;
+
+const NPC16_INI = "NPC16.INI";
+const MISSING_VALUE = -9999.0;   // sentinel: ParseReal() found nothing usable
+
+#include "../Lib/GrabberTools.inc"
+#include "../Lib/Setup.inc"
+
+
+function Abs(value: real): real;
+
+begin
+
+    if value < 0 then
+        Abs = -value;
+    else
+        Abs = value;
+
+end;
+
+
+type real_array = array[1..NUM_GAPS] of real;
+
+type fit_result = record
+
+    valid: boolean;
+    slope: real;
+    intercept: real;
+    r2: real;
+
+end;
+
+
+//  Least-squares fit of ys = slope*xs + intercept over the first n entries
+//  of xs/ys. valid = false if n is too small or all xs are identical
+//  (a vertical/undefined fit).
+function LinearFit(n: integer, xs: real_array, ys: real_array): fit_result;
+
+var i: integer;
+var sx, sy, sxx, sxy, meanX, meanY, denom, ssTot, ssRes, yPred: real;
+var result: fit_result;
+
+begin
+
+    result.valid = false;
+    result.slope = 0.0;
+    result.intercept = 0.0;
+    result.r2 = 0.0;
+
+    if n >= 2 then begin
+
+        sx = 0.0; sy = 0.0; sxx = 0.0; sxy = 0.0;
+
+        for i = 1 to n do begin
+
+            sx = sx + xs[i];
+            sy = sy + ys[i];
+            sxx = sxx + xs[i]*xs[i];
+            sxy = sxy + xs[i]*ys[i];
+
+        end;
+
+        denom = n*sxx - sx*sx;
+
+        if Abs(denom) > 0.0000001 then begin
+
+            meanX = sx / n;
+            meanY = sy / n;
+
+            result.slope = (n*sxy - sx*sy) / denom;
+            result.intercept = meanY - result.slope * meanX;
+
+            ssTot = 0.0; ssRes = 0.0;
+
+            for i = 1 to n do begin
+
+                ssTot = ssTot + (ys[i]-meanY)*(ys[i]-meanY);
+                yPred = result.slope*xs[i] + result.intercept;
+                ssRes = ssRes + (ys[i]-yPred)*(ys[i]-yPred);
+
+            end;
+
+            if ssTot > 0.0 then
+                result.r2 = 1.0 - ssRes/ssTot;
+            else
+                result.r2 = 1.0;
+
+            result.valid = true;
+
+        end;    // if denom
+
+    end;    // if n >= 2
+
+    LinearFit = result;
+
+end;
+
+
+type tip_data = record
+
+    count: integer;
+    zVals: real_array;
+    dxVals: real_array;
+    dyVals: real_array;
+    tipPosXVals: real_array;   // GetTipX(tip) cross-check, see header comment
+    tipPosYVals: real_array;   // GetTipY(tip) cross-check, see header comment
+
+end;
+
+
+var tipData: array[1..NUM_TIPS] of tip_data;
+var wspSurfaceZ: real;
+var gapIndex, repeatIndex, tip: integer;
+var gap, zDispense: real;
+var buffer: setup_buffer;
+var dx, dy, tipPosX, tipPosY: real;
+var gotReading: boolean;
+var scanName: string;
+var reportFolder: string;
+var execResult: integer;
+var rawFile, fitFile: file;
+var piVal, angleX, angleY, angleTotal: real;
+var angleTipX, angleTipY, angleTipTotal: real;
+var fitX, fitY, fitTipX, fitTipY: fit_result;
+var runOk: boolean;
+
+
+begin
+
+    scanName = "run1";
+
+    Window("Pipette Angle Check setup",
+           "Name for this run (used for the output folder):", scanName);
+
+    piVal = 4.0 * ArcTan(1.0);
+
+    if ShowGrabWindow() then begin
+
+        ClearGrabWindow();
+        Writeln("");
+        Writeln(Date(), " ", Time());
+        Writeln("PipetteAngleCheck starting, run name = ", scanName);
+
+        wspSurfaceZ = GetZ(WATER_SENSITIVE_PAPER);
+
+        if wspSurfaceZ < 0 then begin
+
+            Message("Error", "You must measure the z level of the water sensitive paper first!");
+            HideGrabWindow();
+            exit;
+
+        end;
+
+        Writeln("Live GetZ(WSP) = ", wspSurfaceZ:0:3, " mm");
+
+        // Kept short -- NPL strings are capped at 256 chars (see MosaicScan.npl).
+        runOk = Confirmation("Pipette Angle Check",
+            StringOf("Run ", NUM_GAPS*REPEATS_PER_HEIGHT, " calibrations (", NUM_GAPS,
+                      " heights x ", REPEATS_PER_HEIGHT, " repeats), Z-gap ", Z_GAP_START:0:2,
+                      "-", (Z_GAP_START+(NUM_GAPS-1)*Z_GAP_STEP):0:2, " mm, step ", Z_GAP_STEP:0:2,
+                      " mm, ", DROPLETS, " droplet(s), ", DRY_DELAY:0:1, " s dry time.\n",
+                      "Uses WSP paper, takes a while. Continue?"));
+
+        if runOk then begin
+
+            for tip = 1 to NUM_TIPS do begin
+
+                tipData[tip].count = 0;
+
+            end;
+
+            reportFolder = StringOf("report/PipetteAngleCheck_", scanName);
+            execResult = Exec(command = StringOf("cmd.exe /c mkdir \"", reportFolder, "\""), wait = 1);
+
+            rawFile = OpenRW(filename = StringOf(reportFolder, "/raw.csv"));
+
+            if FileState(rawFile) > 0 then
+                Putln(f = rawFile, s = "gap_mm,repeat,tip,dx_mm,dy_mm,gettipx_mm,gettipy_mm");
+
+            SetHeadCamLight(0, true);
+
+            for gapIndex = 0 to NUM_GAPS - 1 do begin
+
+                gap = Z_GAP_START + gapIndex * Z_GAP_STEP;
+                zDispense = wspSurfaceZ - gap;
+
+                Writeln("");
+                Writeln("--- Z-gap = ", gap:0:2, " mm, absolute dispense Z = ", zDispense:0:3, " mm ---");
+
+                for repeatIndex = 1 to REPEATS_PER_HEIGHT do begin
+
+                    SetHeadCamLight(0, true);
+
+                    // TIP_LIST_EDIT_HERE
+                    if CalibratePipettes(tip_list = [1], tar_paper = WATER_SENSITIVE_PAPER,
+                                          z_dispense = zDispense, droplets = DROPLETS, DRY_DELAY) then begin
+
+                        buffer = ReadSetupFile(NPC16_INI);
+
+                        for tip = 1 to NUM_TIPS do begin
+
+                            if GetSystemValue(infoIndex = 1, partIndex = tip, partInfoIndex = 4) > 0 then begin
+
+                                dx = ParseReal(buffer, "Head", StringOf("correctionX", tip), MISSING_VALUE);
+                                dy = ParseReal(buffer, "Head", StringOf("correctionY", tip), MISSING_VALUE);
+
+                                //  Cross-check reading, see header comment. Independent of the INI
+                                //  read above -- a native call, not file I/O.
+                                tipPosX = GetTipX(tip);
+                                tipPosY = GetTipY(tip);
+
+                                gotReading = (dx > MISSING_VALUE + 1.0) and (dy > MISSING_VALUE + 1.0);
+
+                                if gotReading then begin
+
+                                    Writeln("  gap=", gap:0:2, " repeat=", repeatIndex, " tip=", tip,
+                                            "  dx=", dx:0:4, " mm  dy=", dy:0:4, " mm",
+                                            "  GetTipX=", tipPosX:0:4, "  GetTipY=", tipPosY:0:4);
+
+                                    if FileState(rawFile) > 0 then
+                                        Putln(f = rawFile, s = StringOf(gap:0:2, ",", repeatIndex, ",", tip,
+                                                                          ",", dx:0:4, ",", dy:0:4,
+                                                                          ",", tipPosX:0:4, ",", tipPosY:0:4));
+
+                                    if repeatIndex = REPEATS_PER_HEIGHT then begin
+
+                                        tipData[tip].count = tipData[tip].count + 1;
+                                        tipData[tip].zVals[tipData[tip].count] = gap;
+                                        tipData[tip].dxVals[tipData[tip].count] = dx;
+                                        tipData[tip].dyVals[tipData[tip].count] = dy;
+                                        tipData[tip].tipPosXVals[tipData[tip].count] = tipPosX;
+                                        tipData[tip].tipPosYVals[tipData[tip].count] = tipPosY;
+
+                                    end;    // last repeat at this height
+
+                                end;    // gotReading
+                                else begin
+
+                                    Writeln("  WARNING: could not read correctionX/Y", tip, " from ",
+                                            NPC16_INI, " at gap=", gap:0:2, " repeat=", repeatIndex,
+                                            " -- point skipped.");
+
+                                end;
+
+                            end;    // tip enabled
+
+                        end;    // for tip
+
+                    end;    // if CalibratePipettes
+                    else begin
+
+                        Writeln("  CalibratePipettes reported a failure at gap=", gap:0:2,
+                                " repeat=", repeatIndex, " -- point skipped.");
+
+                    end;    // else
+
+                end;    // for repeatIndex
+
+            end;    // for gapIndex
+
+            if FileState(rawFile) > 0 then Close(rawFile);
+
+            //  Fit and report.
+            fitFile = OpenRW(filename = StringOf(reportFolder, "/fit.csv"));
+
+            if FileState(fitFile) > 0 then
+                Putln(f = fitFile, s = StringOf("tip,n,",
+                    "slope_x,intercept_x,r2_x,angle_x_deg,slope_y,intercept_y,r2_y,angle_y_deg,angle_total_deg,",
+                    "slope_gettipx,r2_gettipx,angle_gettipx_deg,slope_gettipy,r2_gettipy,angle_gettipy_deg,angle_gettip_total_deg"));
+
+            Writeln("");
+            Writeln("=== Fit results (dx/dy vs Z-gap, per tip) ===");
+            Writeln("Two independent fits per tip: 'INI' from NPC16.INI correctionX/Y (the");
+            Writeln("established method), 'GetTipX/Y' from the native GetTipX()/GetTipY() cross-");
+            Writeln("check (see header comment) -- compare them; if they agree, GetTipX/Y is");
+            Writeln("confirmed as a simpler, file-free source for a future version of this script.");
+
+            for tip = 1 to NUM_TIPS do begin
+
+                if tipData[tip].count >= 2 then begin
+
+                    fitX = LinearFit(tipData[tip].count, tipData[tip].zVals, tipData[tip].dxVals);
+                    fitY = LinearFit(tipData[tip].count, tipData[tip].zVals, tipData[tip].dyVals);
+                    fitTipX = LinearFit(tipData[tip].count, tipData[tip].zVals, tipData[tip].tipPosXVals);
+                    fitTipY = LinearFit(tipData[tip].count, tipData[tip].zVals, tipData[tip].tipPosYVals);
+
+                    Writeln("Tip ", tip, " (n=", tipData[tip].count, "):");
+
+                    if fitX.valid and fitY.valid then begin
+
+                        angleX = ArcTan(fitX.slope) * 180.0 / piVal;
+                        angleY = ArcTan(fitY.slope) * 180.0 / piVal;
+                        angleTotal = ArcTan(Sqrt(fitX.slope*fitX.slope + fitY.slope*fitY.slope)) * 180.0 / piVal;
+
+                        Writeln("  [INI]      dx/dZ slope = ", fitX.slope:0:4, " (R2=", fitX.r2:0:3, ") -> angle_x = ", angleX:0:2, " deg");
+                        Writeln("  [INI]      dy/dZ slope = ", fitY.slope:0:4, " (R2=", fitY.r2:0:3, ") -> angle_y = ", angleY:0:2, " deg");
+                        Writeln("  [INI]      combined tilt = ", angleTotal:0:2, " deg");
+
+                    end;    // if valid
+                    else begin
+
+                        angleX = 0.0; angleY = 0.0; angleTotal = 0.0;
+                        Writeln("  [INI]      fit not possible (all Z-gaps identical or too few points).");
+
+                    end;
+
+                    if fitTipX.valid and fitTipY.valid then begin
+
+                        angleTipX = ArcTan(fitTipX.slope) * 180.0 / piVal;
+                        angleTipY = ArcTan(fitTipY.slope) * 180.0 / piVal;
+                        angleTipTotal = ArcTan(Sqrt(fitTipX.slope*fitTipX.slope + fitTipY.slope*fitTipY.slope)) * 180.0 / piVal;
+
+                        Writeln("  [GetTipX/Y] dx/dZ slope = ", fitTipX.slope:0:4, " (R2=", fitTipX.r2:0:3, ") -> angle_x = ", angleTipX:0:2, " deg");
+                        Writeln("  [GetTipX/Y] dy/dZ slope = ", fitTipY.slope:0:4, " (R2=", fitTipY.r2:0:3, ") -> angle_y = ", angleTipY:0:2, " deg");
+                        Writeln("  [GetTipX/Y] combined tilt = ", angleTipTotal:0:2, " deg");
+
+                    end;    // if valid
+                    else begin
+
+                        angleTipX = 0.0; angleTipY = 0.0; angleTipTotal = 0.0;
+                        Writeln("  [GetTipX/Y] fit not possible (all Z-gaps identical or too few points).");
+
+                    end;
+
+                    if FileState(fitFile) > 0 then
+                        Putln(f = fitFile, s = StringOf(tip, ",", tipData[tip].count, ",",
+                            fitX.slope:0:5, ",", fitX.intercept:0:5, ",", fitX.r2:0:4, ",", angleX:0:3, ",",
+                            fitY.slope:0:5, ",", fitY.intercept:0:5, ",", fitY.r2:0:4, ",", angleY:0:3, ",",
+                            angleTotal:0:3, ",",
+                            fitTipX.slope:0:5, ",", fitTipX.r2:0:4, ",", angleTipX:0:3, ",",
+                            fitTipY.slope:0:5, ",", fitTipY.r2:0:4, ",", angleTipY:0:3, ",",
+                            angleTipTotal:0:3));
+
+                end;    // if count >= 2
+
+            end;    // for tip
+
+            if FileState(fitFile) > 0 then Close(fitFile);
+
+            Message("Pipette Angle Check", "Sweep finished.\n",
+                    "Raw data and fit results written to\n", reportFolder, "/\n",
+                    "See the report window for a summary.");
+
+            HideGrabWindow();
+
+        end;    // if runOk
+        else begin
+
+            HideGrabWindow();
+
+        end;
+
+    end;    // if ShowGrabWindow
+    else begin
+
+        Message("Error", "Framegrabber is not installed.");
+
+    end;
+
+end.
