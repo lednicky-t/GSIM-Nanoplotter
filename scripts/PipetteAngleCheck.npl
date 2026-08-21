@@ -45,18 +45,30 @@ tip with a nonzero correction on this rig per the calibration notes; edit
 that line (marked TIP_LIST_EDIT_HERE) to broaden it to other tips or [] for
 "all enabled tips".
 
-Not yet run on the instrument -- verify the very first sweep step by hand
-(check report window output looks sane, check NPC16.INI's correctionX1/Y1
-after the first calibration call actually changed) before trusting a full
-unattended run. In particular: this script reads NPC16.INI directly with
-plain file I/O (OpenR) while the very same NanoPlotter engine that has it
-open is running this script -- expected to work (this repo's own
-investigation notes were built by reading this same file's [Head] section
-by hand while the instrument was in use), but if OpenR/ReadSetupFile ever
-reports a failure here, that means the engine is holding it locked in a way
-that blocks a second read, and the correction read-back will not work --
-the on-screen -9999 sentinel warnings below exist to catch that instead of
-silently logging garbage.
+First real run (2026-08-21) hit exactly the risk flagged above: OpenR/
+ReadSetupFile on NPC16.INI did fail while the engine had it open (confirmed
+by the "WARNING: could not read correctionX/Y..." lines in the report
+window), so the correction read-back did not work for any point. That part
+is a real, occasional file-lock condition on this rig, not itself a script
+bug -- the on-screen -9999 sentinel warnings did their job and caught it
+instead of silently logging garbage.
+
+What WAS a script bug, found while fixing the above: raw.csv row logging
+and the tipData[] arrays feeding the GetTipX/GetTipY fit were both gated on
+the INI read succeeding, even though GetTipX/GetTipY (tipPosX/tipPosY) come
+from a native call with no file I/O and are not affected by the INI lock at
+all. So every blocked INI read was also discarding the still-good
+GetTipX/GetTipY point at that height -- net effect, a run where every
+single INI read got blocked produced a CSV with only the header row, even
+though the GetTipX/GetTipY cross-check the header comment below describes
+should have kept working the whole time. Fixed: the two sources are now
+tracked with independent counts/point arrays (tipData[].countIni/countTip),
+so an NPC16.INI read failure at a given point only blanks that point's
+dx/dy (still visible as the -9999 sentinel in raw.csv for diagnosis), while
+GetTipX/GetTipY keep getting logged and fitted normally. Every repeat is
+now written to raw.csv (previously only the gotReading-gated, last-repeat
+rows were written, which also undershot the "every repeat logged" claim
+below).
 
 Built-in cross-check, GetTipX/GetTipY vs. the NPC16.INI read: GetTipX(tip)
 and GetTipY(tip) are real, documented-signature-only (no prose anywhere in
@@ -211,12 +223,22 @@ begin
 end;
 
 
+//  countIni/countTip are tracked separately, not shared, because the two
+//  sources fail independently: an NPC16.INI read blocked by the engine
+//  holding the file open (see header comment) drops an INI-sourced point
+//  without affecting the native GetTipX/GetTipY point at the same height,
+//  and vice versa. Sharing one count+zVals would silently misalign a
+//  source's dx/dy or tipPosX/tipPosY against the wrong Z-gap once the two
+//  sources start missing different points.
 type tip_data = record
 
-    count: integer;
-    zVals: real_array;
+    countIni: integer;
+    zValsIni: real_array;
     dxVals: real_array;
     dyVals: real_array;
+
+    countTip: integer;
+    zValsTip: real_array;
     tipPosXVals: real_array;   // GetTipX(tip) cross-check, see header comment
     tipPosYVals: real_array;   // GetTipY(tip) cross-check, see header comment
 
@@ -280,7 +302,8 @@ begin
 
             for tip = 1 to NUM_TIPS do begin
 
-                tipData[tip].count = 0;
+                tipData[tip].countIni = 0;
+                tipData[tip].countTip = 0;
 
             end;
 
@@ -324,38 +347,48 @@ begin
                                 tipPosX = GetTipX(tip);
                                 tipPosY = GetTipY(tip);
 
+                                //  gotReading only describes the NPC16.INI half (dx/dy). GetTipX/GetTipY
+                                //  (tipPosX/tipPosY) are a native call, not file I/O, so they are not
+                                //  affected by NPC16.INI being locked by the engine (see header comment) --
+                                //  logging and data collection below must not gate one source on the other,
+                                //  or a blocked INI read silently throws away the still-good GetTipX/GetTipY
+                                //  point too (this is what was producing header-only CSV output).
                                 gotReading = (dx > MISSING_VALUE + 1.0) and (dy > MISSING_VALUE + 1.0);
 
-                                if gotReading then begin
-
-                                    Writeln("  gap=", gap:0:2, " repeat=", repeatIndex, " tip=", tip,
-                                            "  dx=", dx:0:4, " mm  dy=", dy:0:4, " mm",
-                                            "  GetTipX=", tipPosX:0:4, "  GetTipY=", tipPosY:0:4);
-
-                                    if FileState(rawFile) > 0 then
-                                        Putln(f = rawFile, s = StringOf(gap:0:2, ",", repeatIndex, ",", tip,
-                                                                          ",", dx:0:4, ",", dy:0:4,
-                                                                          ",", tipPosX:0:4, ",", tipPosY:0:4));
-
-                                    if repeatIndex = REPEATS_PER_HEIGHT then begin
-
-                                        tipData[tip].count = tipData[tip].count + 1;
-                                        tipData[tip].zVals[tipData[tip].count] = gap;
-                                        tipData[tip].dxVals[tipData[tip].count] = dx;
-                                        tipData[tip].dyVals[tipData[tip].count] = dy;
-                                        tipData[tip].tipPosXVals[tipData[tip].count] = tipPosX;
-                                        tipData[tip].tipPosYVals[tipData[tip].count] = tipPosY;
-
-                                    end;    // last repeat at this height
-
-                                end;    // gotReading
-                                else begin
-
+                                if not gotReading then
                                     Writeln("  WARNING: could not read correctionX/Y", tip, " from ",
                                             NPC16_INI, " at gap=", gap:0:2, " repeat=", repeatIndex,
-                                            " -- point skipped.");
+                                            " -- INI columns will show the ", MISSING_VALUE:0:0,
+                                            " sentinel for this point; GetTipX/GetTipY are unaffected.");
 
-                                end;
+                                Writeln("  gap=", gap:0:2, " repeat=", repeatIndex, " tip=", tip,
+                                        "  dx=", dx:0:4, " mm  dy=", dy:0:4, " mm",
+                                        "  GetTipX=", tipPosX:0:4, "  GetTipY=", tipPosY:0:4);
+
+                                //  Every repeat is logged here (not just the last one at each height) so
+                                //  convergence can be checked afterwards, per the header comment.
+                                if FileState(rawFile) > 0 then
+                                    Putln(f = rawFile, s = StringOf(gap:0:2, ",", repeatIndex, ",", tip,
+                                                                      ",", dx:0:4, ",", dy:0:4,
+                                                                      ",", tipPosX:0:4, ",", tipPosY:0:4));
+
+                                if repeatIndex = REPEATS_PER_HEIGHT then begin
+
+                                    if gotReading then begin
+
+                                        tipData[tip].countIni = tipData[tip].countIni + 1;
+                                        tipData[tip].zValsIni[tipData[tip].countIni] = gap;
+                                        tipData[tip].dxVals[tipData[tip].countIni] = dx;
+                                        tipData[tip].dyVals[tipData[tip].countIni] = dy;
+
+                                    end;    // gotReading
+
+                                    tipData[tip].countTip = tipData[tip].countTip + 1;
+                                    tipData[tip].zValsTip[tipData[tip].countTip] = gap;
+                                    tipData[tip].tipPosXVals[tipData[tip].countTip] = tipPosX;
+                                    tipData[tip].tipPosYVals[tipData[tip].countTip] = tipPosY;
+
+                                end;    // last repeat at this height
 
                             end;    // tip enabled
 
@@ -379,7 +412,7 @@ begin
             fitFile = OpenRW(filename = StringOf(reportFolder, "/fit.csv"));
 
             if FileState(fitFile) > 0 then
-                Putln(f = fitFile, s = StringOf("tip,n,",
+                Putln(f = fitFile, s = StringOf("tip,n_ini,n_gettip,",
                     "slope_x,intercept_x,r2_x,angle_x_deg,slope_y,intercept_y,r2_y,angle_y_deg,angle_total_deg,",
                     "slope_gettipx,r2_gettipx,angle_gettipx_deg,slope_gettipy,r2_gettipy,angle_gettipy_deg,angle_gettip_total_deg"));
 
@@ -389,17 +422,19 @@ begin
             Writeln("established method), 'GetTipX/Y' from the native GetTipX()/GetTipY() cross-");
             Writeln("check (see header comment) -- compare them; if they agree, GetTipX/Y is");
             Writeln("confirmed as a simpler, file-free source for a future version of this script.");
+            Writeln("n_ini and n_gettip can differ -- an NPC16.INI read blocked by the engine drops");
+            Writeln("only that point's INI value, not the GetTipX/GetTipY value at the same height.");
 
             for tip = 1 to NUM_TIPS do begin
 
-                if tipData[tip].count >= 2 then begin
+                if (tipData[tip].countIni >= 2) or (tipData[tip].countTip >= 2) then begin
 
-                    fitX = LinearFit(tipData[tip].count, tipData[tip].zVals, tipData[tip].dxVals);
-                    fitY = LinearFit(tipData[tip].count, tipData[tip].zVals, tipData[tip].dyVals);
-                    fitTipX = LinearFit(tipData[tip].count, tipData[tip].zVals, tipData[tip].tipPosXVals);
-                    fitTipY = LinearFit(tipData[tip].count, tipData[tip].zVals, tipData[tip].tipPosYVals);
+                    fitX = LinearFit(tipData[tip].countIni, tipData[tip].zValsIni, tipData[tip].dxVals);
+                    fitY = LinearFit(tipData[tip].countIni, tipData[tip].zValsIni, tipData[tip].dyVals);
+                    fitTipX = LinearFit(tipData[tip].countTip, tipData[tip].zValsTip, tipData[tip].tipPosXVals);
+                    fitTipY = LinearFit(tipData[tip].countTip, tipData[tip].zValsTip, tipData[tip].tipPosYVals);
 
-                    Writeln("Tip ", tip, " (n=", tipData[tip].count, "):");
+                    Writeln("Tip ", tip, " (n_ini=", tipData[tip].countIni, ", n_gettip=", tipData[tip].countTip, "):");
 
                     if fitX.valid and fitY.valid then begin
 
@@ -438,7 +473,7 @@ begin
                     end;
 
                     if FileState(fitFile) > 0 then
-                        Putln(f = fitFile, s = StringOf(tip, ",", tipData[tip].count, ",",
+                        Putln(f = fitFile, s = StringOf(tip, ",", tipData[tip].countIni, ",", tipData[tip].countTip, ",",
                             fitX.slope:0:5, ",", fitX.intercept:0:5, ",", fitX.r2:0:4, ",", angleX:0:3, ",",
                             fitY.slope:0:5, ",", fitY.intercept:0:5, ",", fitY.r2:0:4, ",", angleY:0:3, ",",
                             angleTotal:0:3, ",",
@@ -446,7 +481,7 @@ begin
                             fitTipY.slope:0:5, ",", fitTipY.r2:0:4, ",", angleTipY:0:3, ",",
                             angleTipTotal:0:3));
 
-                end;    // if count >= 2
+                end;    // if countIni >= 2 or countTip >= 2
 
             end;    // for tip
 
